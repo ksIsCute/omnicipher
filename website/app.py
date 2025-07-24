@@ -13,10 +13,12 @@ def ollama_api():
     user_input = request.json.get('message')
     context = request.json.get('context', '')
     ollama_url = 'http://localhost:11434/api/generate'
+    # Model selection from frontend
+    model = request.json.get('model', 'deepseek-r1:8b')
     # Combine context and user input for prompt
     prompt = f"{context}\nUser: {user_input}"
     payload = {
-        'model': 'deepseek-r1:8b',
+        'model': model,
         'prompt': prompt
     }
     response = requests.post(ollama_url, json=payload, stream=True)

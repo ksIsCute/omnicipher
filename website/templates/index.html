@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!-- Highlight.js for code syntax highlighting -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
     <meta charset="UTF-8">
     <title>omnicipher</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
@@ -24,6 +26,11 @@
                 <option value="ai">AI Only</option>
                 <option value="none">None</option>
             </select>
+            <div style="margin-bottom:12px;margin-top:8px;">
+                <label for="promptOpt" style="font-weight:500;margin-right:8px;">Prompt Optimization</label>
+                <input type="checkbox" id="promptOpt" style="vertical-align:middle;">
+                <span style="font-size:0.98em;color:#aaa;margin-left:6px;">Use faster model for short prompts (&lt;20 chars)</span>
+            </div>
             <hr style="border:none;border-top:1px solid #333;margin:18px 0;">
             <div style="margin-bottom:12px;">
                 <div style="font-weight:500;margin-bottom:6px;">Export Context:</div>
@@ -60,6 +67,7 @@
         <pre id="terminalLog" style="font-size:0.98em;white-space:pre-wrap;word-break:break-word;"></pre>
     </details>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
     <script>
         // Export/Import logic
         function copyToClipboard(text) {
@@ -234,8 +242,17 @@
             userInput.disabled = true;
             terminalLog.textContent = '';
             logTerminal('--- Request Start ---');
+            // Prompt Optimization logic
+            const promptOpt = document.getElementById('promptOpt').checked;
+            let model = 'deepseek-r1:8b';
+            if (promptOpt && message.length < 20) {
+                model = 'llama3'; // Use a faster model for short prompts
+                logTerminal('Prompt Optimization: Using fast model (llama3)');
+            } else {
+                logTerminal('Prompt Optimization: Using default model (deepseek-r1:8b)');
+            }
             logTerminal('POST /api/ollama');
-            logTerminal('Payload: ' + JSON.stringify({ message }, null, 2));
+            logTerminal('Payload: ' + JSON.stringify({ message, model }, null, 2));
             try {
                 // Build context from previous messages
                 const context = chatHistory.slice(0, -1).map(m => `User: ${m.user}\nAI: ${m.ai ? m.ai.response : ''}`).join('\n');
@@ -244,54 +261,67 @@
                 const res = await fetch('/api/ollama', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message, context, chatHash })
+                    body: JSON.stringify({ message, context, chatHash, model })
                 });
                 logTerminal('Status: ' + res.status + ' ' + res.statusText);
                 if (!res.ok) throw new Error('Server error: ' + res.status);
                 if (res.body && window.ReadableStream) {
                     const reader = res.body.getReader();
                     logTerminal('--- Streaming Response ---');
+                    let isFastModel = (model === 'llama2' || model === 'llama3');
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) break;
                         const chunk = new TextDecoder().decode(value);
                         result += chunk;
-                        // Detect <think> ... </think> tags
-                        if (!finished) {
-                            if (!inThinking && result.includes('<think>')) {
-                                inThinking = true;
-                                aiThinking = '';
-                            }
-                            if (inThinking) {
-                                const thinkStart = result.indexOf('<think>') + 7;
-                                const thinkEnd = result.indexOf('</think>');
-                                if (thinkEnd !== -1) {
-                                    aiThought = result.substring(thinkStart, thinkEnd).trim();
-                                    aiResponse = result.substring(thinkEnd + 8).trim();
-                                    finished = true;
-                                    lastFinalIndex = 0;
-                                    chatHistory[chatHistory.length - 1].aiTime = getTimestamp();
-                                    renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                        if (!isFastModel) {
+                            // Detect <think> ... </think> tags
+                            if (!finished) {
+                                if (!inThinking && result.includes('<think>')) {
+                                    inThinking = true;
+                                    aiThinking = '';
+                                }
+                                if (inThinking) {
+                                    const thinkStart = result.indexOf('<think>') + 7;
+                                    const thinkEnd = result.indexOf('</think>');
+                                    if (thinkEnd !== -1) {
+                                        aiThought = result.substring(thinkStart, thinkEnd).trim();
+                                        aiResponse = result.substring(thinkEnd + 8).trim();
+                                        finished = true;
+                                        lastFinalIndex = 0;
+                                        chatHistory[chatHistory.length - 1].aiTime = getTimestamp();
+                                        renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                                    } else {
+                                        aiThinking = result.substring(thinkStart).trim();
+                                        renderHistory(chatHistory.length - 1, aiThinking, null, true);
+                                    }
                                 } else {
-                                    aiThinking = result.substring(thinkStart).trim();
+                                    aiThinking = result;
                                     renderHistory(chatHistory.length - 1, aiThinking, null, true);
                                 }
-                            } else {
-                                aiThinking = result;
-                                renderHistory(chatHistory.length - 1, aiThinking, null, true);
                             }
-                        }
-                        if (finished) {
-                            // Only append new post-</think> chunk
-                            const postThinkStart = result.indexOf('</think>') + 8;
-                            const newText = result.substring(postThinkStart + lastFinalIndex);
-                            if (newText) {
-                                aiResponse += newText;
-                                lastFinalIndex += newText.length;
-                                renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                            if (finished) {
+                                // Only append new post-</think> chunk
+                                const postThinkStart = result.indexOf('</think>') + 8;
+                                const newText = result.substring(postThinkStart + lastFinalIndex);
+                                if (newText) {
+                                    aiResponse += newText;
+                                    lastFinalIndex += newText.length;
+                                    renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                                }
                             }
                         }
                         logTerminal('Chunk: ' + chunk);
+                    }
+                    // For fast models, render only once at the end
+                    if (isFastModel) {
+                        aiResponse = result;
+                        finished = true;
+                        chatHistory[chatHistory.length - 1].aiTime = getTimestamp();
+                        // Save final response to history for fast models
+                        chatHistory[chatHistory.length - 1].ai = { thought: '', response: aiResponse };
+                        aiHistory[aiHistory.length - 1] = { ai: { thought: '', response: aiResponse }, aiTime: chatHistory[chatHistory.length - 1].aiTime };
+                        setTimeout(() => renderHistory(chatHistory.length - 1, '', aiResponse), 0);
                     }
                     logTerminal('--- End of Stream ---');
                 } else {
@@ -367,14 +397,54 @@
                 let aiMsg = '';
                 let openAttr = detailsState[i] ? 'open' : '';
                 if (msg.ai) {
-                    aiMsg = `<details ${openAttr} style="margin-bottom:8px;" data-idx="${i}"><summary style="font-weight:500;">AI Thought</summary><div style="white-space:pre-line;color:#666;font-size:0.98em;">${marked.parse(msg.ai.thought || '')}</div></details><div style="margin-top:8px;white-space:pre-wrap;">${marked.parse(msg.ai.response || '')}</div><span style="color:#888;font-size:0.92em;margin-left:8px;">${msg.aiTime || ''}</span>`;
+                    // Only render AI Thought if non-empty
+                    if (msg.ai.thought && msg.ai.thought.trim()) {
+                        aiMsg = `<details ${openAttr} style="margin-bottom:8px;" data-idx="${i}"><summary style="font-weight:500;">AI Thought</summary><div style="white-space:pre-line;color:#666;font-size:0.98em;">${customMarkdown(msg.ai.thought)}</div></details>`;
+                    } else {
+                        aiMsg = '';
+                    }
+                    aiMsg += `<div style="margin-top:8px;white-space:pre-wrap;">${customMarkdown(msg.ai.response || '')}</div><span style="color:#888;font-size:0.92em;margin-left:8px;">${msg.aiTime || ''}</span>`;
                 } else if (i === idx && isThinking) {
                     aiMsg = `<div style="color:#bbb;font-style:italic;margin-bottom:16px;">${marked.parseInline(thought)}</div>`;
                 } else if (i === idx && thought && response !== null) {
-                    aiMsg = `<details ${openAttr} style="margin-bottom:8px;" data-idx="${i}"><summary style="font-weight:500;">AI Thought</summary><div style="white-space:pre-line;color:#666;font-size:0.98em;">${marked.parse(thought)}</div></details><div style="margin-top:8px;white-space:pre-wrap;">${marked.parse(response)}</div><span style="color:#888;font-size:0.92em;margin-left:8px;">${chatHistory[i].aiTime || ''}</span>`;
+                    // Only render AI Thought if non-empty
+                    if (thought && thought.trim()) {
+                        aiMsg = `<details ${openAttr} style="margin-bottom:8px;" data-idx="${i}"><summary style="font-weight:500;">AI Thought</summary><div style="white-space:pre-line;color:#666;font-size:0.98em;">${customMarkdown(thought)}</div></details>`;
+                    } else {
+                        aiMsg = '';
+                    }
+                    aiMsg += `<div style="margin-top:8px;white-space:pre-wrap;">${customMarkdown(response)}</div><span style="color:#888;font-size:0.92em;margin-left:8px;">${chatHistory[i].aiTime || ''}</span>`;
                 }
-                html += `<div style="margin-bottom:24px;">${userMsg}${aiMsg}</div>`;
+        // Custom markdown rendering with highlight.js and mindmap support
+        function customMarkdown(md) {
+            // Mindmap block: ```mindmap\n...
+            let mindmapHtml = md.replace(/```mindmap\n([\s\S]*?)```/gi, function(_, content) {
+                return `<div class=\"mindmap-block\">${escapeHtml(content.trim())}</div>`;
             });
+            // Use marked to parse markdown
+            let html = marked.parse(mindmapHtml, {
+                mangle: false,
+                headerIds: false,
+                breaks: true
+            });
+            // Highlight.js for code blocks
+            setTimeout(() => {
+                document.querySelectorAll('pre code').forEach(block => {
+                    hljs.highlightElement(block);
+                });
+            }, 0);
+            return html;
+        }
+        // Escape HTML for safe rendering in custom blocks
+        function escapeHtml(str) {
+            return str.replace(/&/g, "&amp;")
+                      .replace(/</g, "&lt;")
+                      .replace(/>/g, "&gt;")
+                      .replace(/\"/g, "&quot;")
+                      .replace(/'/g, "&#39;");
+        }
+        html += `<div style="margin-bottom:24px;">${userMsg}${aiMsg}</div>`;
+    });
             // Add re-run logic after rendering
             setTimeout(() => {
                 document.querySelectorAll('.rerunBtn').forEach(btn => {
@@ -394,6 +464,15 @@
                             // Prepare context up to this point
                             const context = chatHistory.slice(0, idx).map(m => `User: ${m.user}\nAI: ${m.ai ? m.ai.response : ''}`).join('\n');
                             const message = chatHistory[idx].user;
+                            // Prompt Optimization logic for re-run
+                            const promptOpt = document.getElementById('promptOpt').checked;
+                            let model = 'deepseek-r1:8b';
+                            if (promptOpt && message.length < 20) {
+                                model = 'llama3';
+                                logTerminal('Prompt Optimization: Using fast model (llama3) for re-run');
+                            } else {
+                                logTerminal('Prompt Optimization: Using default model (deepseek-r1:8b) for re-run');
+                            }
                             // Send to backend
                             errorDiv.innerText = '';
                             sendBtn.disabled = true;
@@ -401,12 +480,12 @@
                             terminalLog.textContent = '';
                             logTerminal('--- Re-run Request Start ---');
                             logTerminal('POST /api/ollama');
-                            logTerminal('Payload: ' + JSON.stringify({ message, context }, null, 2));
+                            logTerminal('Payload: ' + JSON.stringify({ message, context, model }, null, 2));
                             try {
                                 const res = await fetch('/api/ollama', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ message, context })
+                                    body: JSON.stringify({ message, context, model })
                                 });
                                 logTerminal('Status: ' + res.status + ' ' + res.statusText);
                                 let aiResponse = '';
@@ -418,46 +497,63 @@
                                 if (res.body && window.ReadableStream) {
                                     const reader = res.body.getReader();
                                     logTerminal('--- Streaming Response ---');
+                                    let isFastModel = (model === 'llama2' || model === 'llama3');
                                     while (true) {
                                         const { done, value } = await reader.read();
                                         if (done) break;
                                         const chunk = new TextDecoder().decode(value);
                                         result += chunk;
-                                        // Detect <think> ... </think> tags
-                                        if (!finished) {
-                                            if (!aiThought && result.includes('<think>')) {
-                                                aiThought = '';
-                                            }
-                                            if (result.includes('<think>')) {
-                                                const thinkStart = result.indexOf('<think>') + 7;
-                                                const thinkEnd = result.indexOf('</think>');
-                                                if (thinkEnd !== -1) {
-                                                    aiThought = result.substring(thinkStart, thinkEnd).trim();
-                                                    aiResponse = result.substring(thinkEnd + 8).trim();
-                                                    finished = true;
-                                                    lastFinalIndex = 0;
-                                                    chatHistory[idx].aiTime = getTimestamp();
-                                                    renderHistory(idx, aiThought, aiResponse);
+                                        if (!isFastModel) {
+                                            // Detect <think> ... </think> tags
+                                            if (!finished) {
+                                                if (!aiThought && result.includes('<think>')) {
+                                                    aiThought = '';
+                                                }
+                                                if (result.includes('<think>')) {
+                                                    const thinkStart = result.indexOf('<think>') + 7;
+                                                    const thinkEnd = result.indexOf('</think>');
+                                                    if (thinkEnd !== -1) {
+                                                        aiThought = result.substring(thinkStart, thinkEnd).trim();
+                                                        aiResponse = result.substring(thinkEnd + 8).trim();
+                                                        finished = true;
+                                                        lastFinalIndex = 0;
+                                                        chatHistory[idx].aiTime = getTimestamp();
+                                                        renderHistory(idx, aiThought, aiResponse);
+                                                    } else {
+                                                        aiThought = result.substring(thinkStart).trim();
+                                                        renderHistory(idx, aiThought, null, true);
+                                                    }
                                                 } else {
-                                                    aiThought = result.substring(thinkStart).trim();
+                                                    aiThought = result;
                                                     renderHistory(idx, aiThought, null, true);
                                                 }
-                                            } else {
-                                                aiThought = result;
-                                                renderHistory(idx, aiThought, null, true);
                                             }
-                                        }
-                                        if (finished) {
-                                            // Only append new post-</think> chunk
-                                            const postThinkStart = result.indexOf('</think>') + 8;
-                                            const newText = result.substring(postThinkStart + lastFinalIndex);
-                                            if (newText) {
-                                                aiResponse += newText;
-                                                lastFinalIndex += newText.length;
-                                                renderHistory(idx, aiThought, aiResponse);
+                                            if (finished) {
+                                                // Only append new post-</think> chunk
+                                                const postThinkStart = result.indexOf('</think>') + 8;
+                                                const newText = result.substring(postThinkStart + lastFinalIndex);
+                                                if (newText) {
+                                                    aiResponse += newText;
+                                                    lastFinalIndex += newText.length;
+                                                    renderHistory(idx, aiThought, aiResponse);
+                                                }
                                             }
+                                            logTerminal('Chunk: ' + chunk);
                                         }
-                                        logTerminal('Chunk: ' + chunk);
+                                        // For fast models, do not render on every chunk
+                                        if (isFastModel) {
+                                            logTerminal('Chunk: ' + chunk);
+                                        }
+                                    }
+                                    // For fast models, render only once at the end
+                                    if (isFastModel) {
+                        aiResponse = result;
+                        finished = true;
+                        chatHistory[idx].aiTime = getTimestamp();
+                        // Save final response to history for fast models
+                        chatHistory[idx].ai = { thought: '', response: aiResponse };
+                        aiHistory[idx] = { ai: { thought: '', response: aiResponse }, aiTime: chatHistory[idx].aiTime };
+                        renderHistory(idx, '', aiResponse); // Ensure UI updates immediately
                                     }
                                     logTerminal('--- End of Stream ---');
                                 } else {
