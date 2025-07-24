@@ -33,7 +33,7 @@ form {
     border-color: #666;
     background: #222;
 }
-button[type="submit"] {
+button[type="submit"], #newChatBtn {
     padding: 10px 20px;
     border: none;
     border-radius: 8px;
@@ -43,7 +43,7 @@ button[type="submit"] {
     cursor: pointer;
     transition: background 0.2s;
 }
-button[type="submit"]:hover {
+button[type="submit"]:hover, #newChatBtn:hover {
     background: #666;
 }
 #chatHistory {
