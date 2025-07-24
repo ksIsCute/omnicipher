@@ -1,0 +1,5 @@
+# Website requirements
+Flask==2.3.2
+requests==2.31.0
+# For Bluetooth (optional, not used in main app.py yet)
+pybluez==0.23

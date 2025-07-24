@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>omnicipher</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <h1>omnicipher</h1>
+    <form id="chatForm" style="position:sticky;top:0;z-index:2;background:#181a1b;padding-bottom:16px;">
+        <input type="text" id="userInput" placeholder="Type your message..." required autocomplete="off">
+        <button type="submit" id="sendBtn">Send</button>
+        <button type="button" id="newChatBtn" style="margin-left:10px;background:#222;color:#fff;border-radius:8px;padding:10px 20px;border:none;cursor:pointer;">New Chat</button>
+    </form>
+    <div id="chatHistory" style="max-height:60vh;overflow-y:auto;margin-bottom:16px;"></div>
+    <div id="error" style="color:#d32f2f;margin-top:10px;"></div>
+    <details id="terminal" style="margin-top:24px;background:#222;color:#eee;border-radius:8px;padding:12px;">
+        <summary style="cursor:pointer;font-weight:500;">Debug Terminal</summary>
+        <pre id="terminalLog" style="font-size:0.98em;white-space:pre-wrap;word-break:break-word;"></pre>
+    </details>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        const chatForm = document.getElementById('chatForm');
+        const userInput = document.getElementById('userInput');
+        const chatHistoryDiv = document.getElementById('chatHistory');
+        let chatHistory = [];
+        let aiHistory = [];
+        // --- Persistent Storage ---
+        function setCookie(name, value, days) {
+            let expires = "";
+            if (days) {
+                const date = new Date();
+                date.setTime(date.getTime() + (days*24*60*60*1000));
+                expires = "; expires=" + date.toUTCString();
+            }
+            document.cookie = name + "=" + (value || "")  + expires + "; path=/";
+        }
+        function getCookie(name) {
+            const nameEQ = name + "=";
+            const ca = document.cookie.split(';');
+            for(let i=0;i < ca.length;i++) {
+                let c = ca[i];
+                while (c.charAt(0)==' ') c = c.substring(1,c.length);
+                if (c.indexOf(nameEQ) == 0) return c.substring(nameEQ.length,c.length);
+            }
+            return null;
+        }
+        function eraseCookie(name) {   
+            document.cookie = name+'=; Max-Age=-99999999;';  
+        }
+        function hashHistory(history) {
+            return btoa(unescape(encodeURIComponent(JSON.stringify(history))));
+        }
+        function unhashHistory(hash) {
+            try {
+                return JSON.parse(decodeURIComponent(escape(atob(hash))));
+            } catch (e) { return []; }
+        }
+        function hashAI(aiList) {
+            return btoa(unescape(encodeURIComponent(JSON.stringify(aiList))));
+        }
+        function unhashAI(hash) {
+            try {
+                return JSON.parse(decodeURIComponent(escape(atob(hash))));
+            } catch (e) { return []; }
+        }
+        // Restore chat from cookie
+        window.addEventListener('DOMContentLoaded', () => {
+            const userHash = getCookie('chatHash');
+            const aiHash = getCookie('aiHash');
+            if (userHash) chatHistory = unhashHistory(userHash);
+            if (aiHash) aiHistory = unhashAI(aiHash);
+            // Merge AI responses into chatHistory if lengths match
+            if (chatHistory.length && aiHistory.length && chatHistory.length === aiHistory.length) {
+                chatHistory = chatHistory.map((msg, i) => {
+                    return { ...msg, ai: aiHistory[i].ai, aiTime: aiHistory[i].aiTime };
+                });
+            }
+            renderHistory();
+        });
+        function getTimestamp() {
+            const d = new Date();
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+        const errorDiv = document.getElementById('error');
+        const sendBtn = document.getElementById('sendBtn');
+        const terminalLog = document.getElementById('terminalLog');
+
+        function logTerminal(msg) {
+            terminalLog.textContent += msg + '\n';
+        }
+
+        chatForm.onsubmit = async function(e) {
+            e.preventDefault();
+            let message = userInput.value;
+            let aiThinking = '';
+            let aiResponse = '';
+            let aiThought = '';
+            let inThinking = false;
+            let finished = false;
+            let lastFinalIndex = 0;
+            let result = '';
+            chatHistory.push({ user: message, ai: null, userTime: getTimestamp(), aiTime: null });
+            aiHistory.push({ ai: null, aiTime: null });
+            renderHistory();
+            // Save hashes to cookies
+            setCookie('chatHash', hashHistory(chatHistory.map(m => ({ user: m.user, userTime: m.userTime }))), 7);
+            setCookie('aiHash', hashAI(aiHistory), 7);
+            errorDiv.innerText = '';
+            sendBtn.disabled = true;
+            userInput.disabled = true;
+            terminalLog.textContent = '';
+            logTerminal('--- Request Start ---');
+            logTerminal('POST /api/ollama');
+            logTerminal('Payload: ' + JSON.stringify({ message }, null, 2));
+            try {
+                // Build context from previous messages
+                const context = chatHistory.slice(0, -1).map(m => `User: ${m.user}\nAI: ${m.ai ? m.ai.response : ''}`).join('\n');
+                // Pass hash to backend if needed
+                const chatHash = hashHistory(chatHistory);
+                const res = await fetch('/api/ollama', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, context, chatHash })
+                });
+                logTerminal('Status: ' + res.status + ' ' + res.statusText);
+                if (!res.ok) throw new Error('Server error: ' + res.status);
+                if (res.body && window.ReadableStream) {
+                    const reader = res.body.getReader();
+                    logTerminal('--- Streaming Response ---');
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        const chunk = new TextDecoder().decode(value);
+                        result += chunk;
+                        // Detect <think> ... </think> tags
+                        if (!finished) {
+                            if (!inThinking && result.includes('<think>')) {
+                                inThinking = true;
+                                aiThinking = '';
+                            }
+                            if (inThinking) {
+                                const thinkStart = result.indexOf('<think>') + 7;
+                                const thinkEnd = result.indexOf('</think>');
+                                if (thinkEnd !== -1) {
+                                    aiThought = result.substring(thinkStart, thinkEnd).trim();
+                                    aiResponse = result.substring(thinkEnd + 8).trim();
+                                    finished = true;
+                                    lastFinalIndex = 0;
+                                    chatHistory[chatHistory.length - 1].aiTime = getTimestamp();
+                                    renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                                } else {
+                                    aiThinking = result.substring(thinkStart).trim();
+                                    renderHistory(chatHistory.length - 1, aiThinking, null, true);
+                                }
+                            } else {
+                                aiThinking = result;
+                                renderHistory(chatHistory.length - 1, aiThinking, null, true);
+                            }
+                        }
+                        if (finished) {
+                            // Only append new post-</think> chunk
+                            const postThinkStart = result.indexOf('</think>') + 8;
+                            const newText = result.substring(postThinkStart + lastFinalIndex);
+                            if (newText) {
+                                aiResponse += newText;
+                                lastFinalIndex += newText.length;
+                                renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                            }
+                        }
+                        logTerminal('Chunk: ' + chunk);
+                    }
+                    logTerminal('--- End of Stream ---');
+                } else {
+                    const data = await res.json();
+                    aiResponse = data.response || JSON.stringify(data);
+                    finished = true;
+                    chatHistory[chatHistory.length - 1].aiTime = getTimestamp();
+                    renderHistory(chatHistory.length - 1, aiThought, aiResponse);
+                    logTerminal('Response: ' + JSON.stringify(data, null, 2));
+                }
+                // Save final response to history
+                chatHistory[chatHistory.length - 1].ai = { thought: aiThought, response: aiResponse };
+                chatHistory[chatHistory.length - 1].aiTime = getTimestamp();
+                aiHistory[aiHistory.length - 1] = { ai: { thought: aiThought, response: aiResponse }, aiTime: chatHistory[chatHistory.length - 1].aiTime };
+                // Update hashes in cookies after AI response
+                setCookie('chatHash', hashHistory(chatHistory.map(m => ({ user: m.user, userTime: m.userTime }))), 7);
+                setCookie('aiHash', hashAI(aiHistory), 7);
+            } catch (err) {
+                errorDiv.innerText = err.message;
+                logTerminal('Error: ' + err.message);
+            }
+            logTerminal('--- Request End ---');
+            sendBtn.disabled = false;
+            userInput.disabled = false;
+            // Do not clear userInput.value so prompt stays
+        };
+
+        function renderHistory(idx, thought, response, isThinking) {
+        // New Chat button logic
+        document.getElementById('newChatBtn').onclick = function() {
+            chatHistory = [];
+            aiHistory = [];
+            eraseCookie('chatHash');
+            eraseCookie('aiHash');
+            renderHistory();
+        };
+            // Only update the latest message, keep previous intact
+            let html = '';
+            chatHistory.forEach((msg, i) => {
+                let userMsg = `<div style="margin-bottom:4px;"><span style="font-weight:500;">You:</span> <span style="white-space:pre-wrap;">${msg.user}</span> <span style="color:#888;font-size:0.92em;margin-left:8px;">${msg.userTime || ''}</span></div>`;
+                let aiMsg = '';
+                if (i < chatHistory.length - 1 && msg.ai) {
+                    // Previous messages: show final AI response
+                    aiMsg = `<details open style="margin-bottom:8px;"><summary style="font-weight:500;">AI Thought</summary><div style="white-space:pre-line;color:#666;font-size:0.98em;">${marked.parse(msg.ai.thought || '')}</div></details><div style="margin-top:8px;white-space:pre-wrap;">${marked.parse(msg.ai.response || '')}</div><span style="color:#888;font-size:0.92em;margin-left:8px;">${msg.aiTime || ''}</span>`;
+                } else if (i === idx) {
+                    // Latest message: show live state
+                    if (isThinking) {
+                        aiMsg = `<div style="color:#bbb;font-style:italic;margin-bottom:16px;">${marked.parseInline(thought)}</div>`;
+                    } else if (thought && response !== null) {
+                        aiMsg = `<details open style="margin-bottom:8px;"><summary style="font-weight:500;">AI Thought</summary><div style="white-space:pre-line;color:#666;font-size:0.98em;">${marked.parse(thought)}</div></details><div style="margin-top:8px;white-space:pre-wrap;">${marked.parse(response)}</div><span style="color:#888;font-size:0.92em;margin-left:8px;">${chatHistory[i].aiTime || ''}</span>`;
+                    }
+                }
+                html += `<div style="margin-bottom:24px;">${userMsg}${aiMsg}</div>`;
+            });
+            chatHistoryDiv.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
